@@ -1,0 +1,64 @@
+name: Reusable PR Review
+
+on:
+  workflow_call:
+    inputs:
+      target_base_branch:
+        required: false
+        type: string
+        default: develop
+      llm_model:
+        required: false
+        type: string
+        default: gpt-4o
+      llm_base_url:
+        required: false
+        type: string
+        default: https://api.openai.com/v1/chat/completions
+      dry_run:
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      CENTRAL_REVIEW_GH_TOKEN:
+        required: true
+      CENTRAL_REVIEW_LLM_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  run-review:
+    if: github.event_name == 'pull_request' && github.base_ref == inputs.target_base_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout central agent repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ai-code-review-agent
+          path: ai-code-review-agent
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run review
+        working-directory: ai-code-review-agent
+        env:
+          GITHUB_TOKEN: ${{ secrets.CENTRAL_REVIEW_GH_TOKEN }}
+          LLM_API_KEY: ${{ secrets.CENTRAL_REVIEW_LLM_API_KEY }}
+          LLM_MODEL: ${{ inputs.llm_model }}
+          LLM_BASE_URL: ${{ inputs.llm_base_url }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          TARGET_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          SKILL_PATH: .github/skills/code-review-pro/SKILL.md
+        run: python scripts/review_pr.py
