@@ -10,11 +10,11 @@ on:
       llm_model:
         required: false
         type: string
-        default: gpt-4o
+        default: gpt-oss-120b
       llm_base_url:
         required: false
         type: string
-        default: https://api.openai.com/v1/chat/completions
+        default: http://litellm-alb-1953047705.us-east-1.elb.amazonaws.com/v1
       dry_run:
         required: false
         type: boolean
