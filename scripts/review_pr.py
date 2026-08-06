@@ -47,6 +47,13 @@ def gh_post(url: str, token: str, payload: dict[str, Any]) -> Any:
     return resp.json()
 
 
+def gh_patch(url: str, token: str, payload: dict[str, Any]) -> Any:
+    resp = requests.patch(url, headers=gh_headers(token), json=payload, timeout=30)
+    if resp.status_code >= 400:
+        raise RuntimeError(f"GitHub PATCH failed {resp.status_code}: {url}: {resp.text[:300]}")
+    return resp.json()
+
+
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
@@ -55,6 +62,16 @@ def read_text(path: str) -> str:
 def has_marker(comments: list[dict[str, Any]], sha: str) -> bool:
     marker = f"{MARKER_PREFIX}{sha} -->"
     return any(marker in str(c.get("body") or "") for c in comments)
+
+
+def find_existing_review_comment(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Find our existing code-review-pro comment (by marker, any PR version)."""
+    marker_start = MARKER_PREFIX
+    for comment in comments:
+        body = str(comment.get("body") or "")
+        if body.startswith(marker_start):
+            return comment
+    return None
 
 
 def build_patch_blob(pr: dict[str, Any], files: list[dict[str, Any]]) -> str:
@@ -186,55 +203,12 @@ def post_review_comments(
     github_token: str,
     findings: list[tuple[str, int, str]],
 ) -> None:
-    """Post individual review comments for each finding at the specified line.
+    """Placeholder for line-level comments (not currently used).
     
-    NOTE: This tries to post comments but GitHub's API is strict about line numbers.
-    Line numbers must correspond to actual changed lines in the diff.
-    If posting fails, findings are already in the summary comment.
+    GitHub's API restricts line-level comments to lines actually in the diff.
+    All findings are included in the main summary comment instead.
     """
-    if not findings:
-        print("No findings with specific line locations found.")
-        return
-    
-    print(f"[DEBUG] Attempting to post {len(findings)} review comments...")
-    
-    # Instead of strict line:number format, try a more flexible approach
-    # Just post findings to a single consolidated review comment per changed file
-    findings_by_file: dict[str, list[str]] = {}
-    
-    for file_path, line_num, finding_text in findings:
-        # Clean up finding text
-        comment_body = finding_text.replace("|", "").strip()
-        if not comment_body or len(comment_body) < 3:
-            continue
-        
-        if file_path not in findings_by_file:
-            findings_by_file[file_path] = []
-        
-        findings_by_file[file_path].append(f"Line {line_num}: {comment_body}")
-    
-    # Post one comment per file with all findings for that file
-    for file_path, comments in findings_by_file.items():
-        combined_body = "🔍 **Code Review Findings**:\n" + "\n".join(f"- {c}" for c in comments)
-        
-        payload = {
-            "commit_sha": pr_sha,
-            "path": file_path,
-            "line": 1,  # Post at first changed line (more reliable than arbitrary lines)
-            "side": "RIGHT",
-            "body": combined_body[:2000],  # GitHub comment limit
-        }
-        
-        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
-        try:
-            print(f"[DEBUG] Posting findings for {file_path}...")
-            gh_post(url, github_token, payload)
-            print(f"[DEBUG] ✓ Posted review for {file_path}")
-        except RuntimeError as e:
-            error_msg = str(e)
-            print(f"[DEBUG] Could not post PR review comment (findings in summary): {error_msg[:100]}")
-            # Silently fail - findings are already in the summary comment
-            continue
+    pass
 
 
 def main() -> int:
@@ -260,9 +234,8 @@ def main() -> int:
         return 0
 
     comments = gh_get(comments_url, github_token, params={"per_page": 100})
-    if isinstance(comments, list) and has_marker(comments, pr_sha):
-        print(f"Review already posted for SHA {pr_sha[:8]}. Skipping.")
-        return 0
+    if not isinstance(comments, list):
+        comments = []
 
     files = gh_get(files_url, github_token, params={"per_page": 100})
     if not isinstance(files, list) or not files:
@@ -277,32 +250,31 @@ def main() -> int:
     body = f"{marker}\n## Automated Code Review (code-review-pro)\n\n{review_md}"
 
     if dry_run:
-        print("DRY_RUN enabled. Would post review comment:")
+        print("DRY_RUN enabled. Would post/update review comment:")
         print(body[:1200])
         findings = parse_findings_with_locations(review_md)
         if findings:
-            print(f"\nWould also post {len(findings)} line-level comments:")
+            print(f"\nFound {len(findings)} line-level findings in output")
             for file_path, line_num, text in findings[:5]:
                 print(f"  - {file_path}:{line_num}")
         return 0
 
-    # Post summary comment
-    gh_post(comments_url, github_token, {"body": body})
-    print(f"Posted review summary to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
+    # Find existing review comment or create new one
+    existing_comment = find_existing_review_comment(comments)
     
-    # Parse and post line-level comments
-    print(f"\n[DEBUG] ===== PARSING LINE-LEVEL FINDINGS =====")
-    print(f"[DEBUG] Review markdown length: {len(review_md)} chars")
-    print(f"[DEBUG] First 1500 chars of review:\n{review_md[:1500]}\n...")
-    
-    findings = parse_findings_with_locations(review_md)
-    print(f"[DEBUG] Found {len(findings)} line-level findings")
-    
-    if findings:
-        print(f"[DEBUG] Line findings found, attempting to post...")
-        post_review_comments(owner, repo, pr_number, pr_sha, github_token, findings)
+    if existing_comment:
+        # Update existing comment
+        comment_id = existing_comment.get("id")
+        comment_url = f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{comment_id}"
+        gh_patch(comment_url, github_token, {"body": body})
+        print(f"Updated review comment on {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
     else:
-        print(f"[DEBUG] No line-level findings detected. LLM may not have included line:number format.")
+        # Post new comment
+        gh_post(comments_url, github_token, {"body": body})
+        print(f"Posted review comment to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
+    
+    # Parse findings (for logging only, not for posting)
+    print(f"\n[DEBUG] Review includes {len(parse_findings_with_locations(review_md))} line-level findings")
     
     return 0
 
