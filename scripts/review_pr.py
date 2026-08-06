@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 import requests
@@ -121,6 +122,86 @@ def call_llm(skill_text: str, patch_blob: str, model: str, base_url: str, api_ke
     return str(content)
 
 
+def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
+    """Extract (file_path, line_number, finding_text) from review markdown.
+    
+    Looks for patterns like:
+    - "file.ts:42" or "file.ts:L42" or "file.ts (line 42)"
+    - In markdown tables or prose
+    """
+    findings: list[tuple[str, int, str]] = []
+    
+    # Pattern 1: "path/to/file.ext:42" or "path/to/file.ext:L42"
+    pattern1 = r'([\w/._-]+\.[a-z]{1,3}):(?:L)?(\d+)'
+    # Pattern 2: "path/to/file.ext (line 42)"
+    pattern2 = r'([\w/._-]+\.[a-z]{1,3})\s+\(line\s+(\d+)\)'
+    
+    lines = review_md.split('\n')
+    for line in lines:
+        # Try pattern 1
+        match1 = re.search(pattern1, line)
+        if match1:
+            file_path, line_num_str = match1.groups()
+            try:
+                line_num = int(line_num_str)
+                findings.append((file_path, line_num, line.strip()))
+            except ValueError:
+                continue
+        
+        # Try pattern 2
+        match2 = re.search(pattern2, line)
+        if match2:
+            file_path, line_num_str = match2.groups()
+            try:
+                line_num = int(line_num_str)
+                findings.append((file_path, line_num, line.strip()))
+            except ValueError:
+                continue
+    
+    return findings
+
+
+def post_review_comments(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_sha: str,
+    github_token: str,
+    findings: list[tuple[str, int, str]],
+) -> None:
+    """Post individual review comments for each finding at the specified line.
+    
+    Uses GitHub's PR review comments API:
+    POST /repos/{owner}/{repo}/pulls/{pull_number}/comments
+    """
+    if not findings:
+        print("No findings with specific line locations found.")
+        return
+    
+    for file_path, line_num, finding_text in findings:
+        # Clean up finding text - remove markdown table markers
+        comment_body = finding_text.replace("|", "").strip()
+        if not comment_body or len(comment_body) < 3:
+            continue
+        
+        payload = {
+            "commit_sha": pr_sha,
+            "path": file_path,
+            "line": line_num,
+            "side": "RIGHT",  # RIGHT means the PR's head commit
+            "body": f"🔍 **Code Review**: {comment_body}",
+        }
+        
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+        try:
+            gh_post(url, github_token, payload)
+            print(f"Posted comment at {file_path}:{line_num}")
+        except RuntimeError as e:
+            # Don't fail entire review if one comment fails
+            print(f"Warning: Failed to post comment at {file_path}:{line_num}: {e}")
+            continue
+
+
 def main() -> int:
     github_token = env_required("GITHUB_TOKEN")
     llm_api_key = env_required("LLM_API_KEY")
@@ -163,10 +244,22 @@ def main() -> int:
     if dry_run:
         print("DRY_RUN enabled. Would post review comment:")
         print(body[:1200])
+        findings = parse_findings_with_locations(review_md)
+        if findings:
+            print(f"\nWould also post {len(findings)} line-level comments:")
+            for file_path, line_num, text in findings[:5]:
+                print(f"  - {file_path}:{line_num}")
         return 0
 
+    # Post summary comment
     gh_post(comments_url, github_token, {"body": body})
-    print(f"Posted review to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
+    print(f"Posted review summary to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
+    
+    # Parse and post line-level comments
+    findings = parse_findings_with_locations(review_md)
+    if findings:
+        post_review_comments(owner, repo, pr_number, pr_sha, github_token, findings)
+    
     return 0
 
 

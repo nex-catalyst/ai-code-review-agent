@@ -73,7 +73,7 @@ Always present findings first.
 Section 1: Findings (ordered by severity)
 - For each finding, include all required fields:
   - Severity: Critical | High | Medium | Low
-  - Location: file path + line number(s)
+  - Location: file path + line number(s) in format: `filename.ext:42` or `path/to/file.ext (line 42)`
   - Category: Correctness | Security | Performance | Maintainability | Tests | API Compatibility
   - Evidence: what in code triggered the finding
   - Risk: user/system impact if not fixed
@@ -83,6 +83,9 @@ Recommended format:
 
 | Severity | Location | Category | Finding | Risk | Fix |
 |---|---|---|---|---|---|
+| High | src/config.ts:18 | Security | SQL injection via unsanitized query | Database compromise | Use parameterized queries |
+
+**Important**: Use the file:line notation (e.g., `src/auth.ts:45` or `lib/utils.py (line 12)`) in the Location column so that automated tools can post comments at specific lines.
 
 Section 2: Open Questions / Assumptions
 - Include only when evidence is incomplete.
