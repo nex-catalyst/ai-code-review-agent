@@ -195,10 +195,13 @@ def post_review_comments(
         print("No findings with specific line locations found.")
         return
     
+    print(f"[DEBUG] Attempting to post {len(findings)} review comments...")
+    
     for file_path, line_num, finding_text in findings:
         # Clean up finding text - remove markdown table markers
         comment_body = finding_text.replace("|", "").strip()
         if not comment_body or len(comment_body) < 3:
+            print(f"[DEBUG] Skipping empty finding: {finding_text[:50]}")
             continue
         
         payload = {
@@ -211,11 +214,16 @@ def post_review_comments(
         
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         try:
-            gh_post(url, github_token, payload)
-            print(f"Posted comment at {file_path}:{line_num}")
+            print(f"[DEBUG] Posting comment: file={file_path}, line={line_num}, url={url}")
+            result = gh_post(url, github_token, payload)
+            print(f"[DEBUG] ✓ Posted comment at {file_path}:{line_num}")
         except RuntimeError as e:
-            # Don't fail entire review if one comment fails
-            print(f"Warning: Failed to post comment at {file_path}:{line_num}: {e}")
+            error_msg = str(e)
+            print(f"[DEBUG] ✗ FAILED to post at {file_path}:{line_num}")
+            print(f"[DEBUG] Error: {error_msg}")
+            # Log the full error but continue
+            if "422" in error_msg:
+                print(f"[DEBUG] (422 means line {line_num} not in diff or invalid commit)")
             continue
 
 
@@ -273,9 +281,18 @@ def main() -> int:
     print(f"Posted review summary to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
     
     # Parse and post line-level comments
+    print(f"\n[DEBUG] ===== PARSING LINE-LEVEL FINDINGS =====")
+    print(f"[DEBUG] Review markdown length: {len(review_md)} chars")
+    print(f"[DEBUG] First 1500 chars of review:\n{review_md[:1500]}\n...")
+    
     findings = parse_findings_with_locations(review_md)
+    print(f"[DEBUG] Found {len(findings)} line-level findings")
+    
     if findings:
+        print(f"[DEBUG] Line findings found, attempting to post...")
         post_review_comments(owner, repo, pr_number, pr_sha, github_token, findings)
+    else:
+        print(f"[DEBUG] No line-level findings detected. LLM may not have included line:number format.")
     
     return 0
 
