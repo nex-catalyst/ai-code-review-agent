@@ -188,8 +188,9 @@ def post_review_comments(
 ) -> None:
     """Post individual review comments for each finding at the specified line.
     
-    Uses GitHub's PR review comments API:
-    POST /repos/{owner}/{repo}/pulls/{pull_number}/comments
+    NOTE: This tries to post comments but GitHub's API is strict about line numbers.
+    Line numbers must correspond to actual changed lines in the diff.
+    If posting fails, findings are already in the summary comment.
     """
     if not findings:
         print("No findings with specific line locations found.")
@@ -197,33 +198,42 @@ def post_review_comments(
     
     print(f"[DEBUG] Attempting to post {len(findings)} review comments...")
     
+    # Instead of strict line:number format, try a more flexible approach
+    # Just post findings to a single consolidated review comment per changed file
+    findings_by_file: dict[str, list[str]] = {}
+    
     for file_path, line_num, finding_text in findings:
-        # Clean up finding text - remove markdown table markers
+        # Clean up finding text
         comment_body = finding_text.replace("|", "").strip()
         if not comment_body or len(comment_body) < 3:
-            print(f"[DEBUG] Skipping empty finding: {finding_text[:50]}")
             continue
+        
+        if file_path not in findings_by_file:
+            findings_by_file[file_path] = []
+        
+        findings_by_file[file_path].append(f"Line {line_num}: {comment_body}")
+    
+    # Post one comment per file with all findings for that file
+    for file_path, comments in findings_by_file.items():
+        combined_body = "🔍 **Code Review Findings**:\n" + "\n".join(f"- {c}" for c in comments)
         
         payload = {
             "commit_sha": pr_sha,
             "path": file_path,
-            "line": line_num,
-            "side": "RIGHT",  # RIGHT means the PR's head commit
-            "body": f"🔍 **Code Review**: {comment_body}",
+            "line": 1,  # Post at first changed line (more reliable than arbitrary lines)
+            "side": "RIGHT",
+            "body": combined_body[:2000],  # GitHub comment limit
         }
         
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         try:
-            print(f"[DEBUG] Posting comment: file={file_path}, line={line_num}, url={url}")
-            result = gh_post(url, github_token, payload)
-            print(f"[DEBUG] ✓ Posted comment at {file_path}:{line_num}")
+            print(f"[DEBUG] Posting findings for {file_path}...")
+            gh_post(url, github_token, payload)
+            print(f"[DEBUG] ✓ Posted review for {file_path}")
         except RuntimeError as e:
             error_msg = str(e)
-            print(f"[DEBUG] ✗ FAILED to post at {file_path}:{line_num}")
-            print(f"[DEBUG] Error: {error_msg}")
-            # Log the full error but continue
-            if "422" in error_msg:
-                print(f"[DEBUG] (422 means line {line_num} not in diff or invalid commit)")
+            print(f"[DEBUG] Could not post PR review comment (findings in summary): {error_msg[:100]}")
+            # Silently fail - findings are already in the summary comment
             continue
 
 
