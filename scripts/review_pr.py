@@ -83,12 +83,17 @@ def build_patch_blob(pr: dict[str, Any], files: list[dict[str, Any]]) -> str:
 def call_llm(skill_text: str, patch_blob: str, model: str, base_url: str, api_key: str) -> str:
     system_prompt = (
         "You are a strict senior code reviewer. Follow the provided skill instructions exactly. "
-        "Always return findings-first output with severity ordering and concrete remediation."
+        "Always return findings-first output with severity ordering and concrete remediation. "
+        "CRITICAL: Every finding MUST include the exact file path and line number in the Location field. "
+        "Use format: filename.ext:42 or path/to/file.ext:100 or path/to/file.py (line 25). "
+        "No finding is valid without a specific line number."
     )
     user_prompt = (
         "Skill instructions:\n"
         f"{skill_text}\n\n"
-        "Review this pull request diff now. Focus on correctness, security, performance, maintainability, tests, and API compatibility.\n\n"
+        "Review this pull request diff now. Focus on correctness, security, performance, maintainability, tests, and API compatibility.\n"
+        "IMPORTANT: For each finding, MUST include the file path and line number in the Location column. "
+        "Examples: src/auth.ts:45, lib/utils.py (line 12), config/database.yml:8\n\n"
         f"{patch_blob}"
     )
 
@@ -119,6 +124,10 @@ def call_llm(skill_text: str, patch_blob: str, model: str, base_url: str, api_ke
     content = ((choices[0] or {}).get("message") or {}).get("content")
     if not content:
         raise RuntimeError("LLM response has empty content")
+    
+    # Debug: log first part of review
+    print(f"[DEBUG] LLM Review (first 500 chars):\n{content[:500]}\n...")
+    
     return str(content)
 
 
@@ -132,14 +141,17 @@ def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
     findings: list[tuple[str, int, str]] = []
     
     # Pattern 1: "path/to/file.ext:42" or "path/to/file.ext:L42"
-    pattern1 = r'([\w/._-]+\.[a-z]{1,3}):(?:L)?(\d+)'
+    # More robust: matches word chars, slashes, dots, dashes in path + any extension
+    pattern1 = r'([\w/.\-]+\.\w+):(?:L)?(\d+)'
     # Pattern 2: "path/to/file.ext (line 42)"
-    pattern2 = r'([\w/._-]+\.[a-z]{1,3})\s+\(line\s+(\d+)\)'
+    pattern2 = r'([\w/.\-]+\.\w+)\s+\(line\s+(\d+)\)'
     
     lines = review_md.split('\n')
+    debug_lines_checked = 0
     for line in lines:
+        debug_lines_checked += 1
         # Try pattern 1
-        match1 = re.search(pattern1, line)
+        match1 = re.search(pattern1, line, re.IGNORECASE)
         if match1:
             file_path, line_num_str = match1.groups()
             try:
@@ -149,7 +161,7 @@ def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
                 continue
         
         # Try pattern 2
-        match2 = re.search(pattern2, line)
+        match2 = re.search(pattern2, line, re.IGNORECASE)
         if match2:
             file_path, line_num_str = match2.groups()
             try:
@@ -157,6 +169,11 @@ def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
                 findings.append((file_path, line_num, line.strip()))
             except ValueError:
                 continue
+    
+    print(f"[DEBUG] Parsed {len(findings)} line-level findings from {debug_lines_checked} lines")
+    if findings:
+        for f in findings[:3]:
+            print(f"[DEBUG]   - {f[0]}:{f[1]}")
     
     return findings
 

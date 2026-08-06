@@ -71,21 +71,26 @@ Default ordering:
 Always present findings first.
 
 Section 1: Findings (ordered by severity)
+- **REQUIRED**: Every finding MUST include specific file path AND line number
 - For each finding, include all required fields:
   - Severity: Critical | High | Medium | Low
-  - Location: file path + line number(s) in format: `filename.ext:42` or `path/to/file.ext (line 42)`
+  - **Location**: file path + line number(s) — REQUIRED FORMAT EXAMPLES:
+    - `src/auth.ts:45` (recommended)
+    - `lib/database.py (line 12)`
+    - `config/settings.yml:8`
   - Category: Correctness | Security | Performance | Maintainability | Tests | API Compatibility
   - Evidence: what in code triggered the finding
   - Risk: user/system impact if not fixed
   - Fix: minimal concrete remediation
 
-Recommended format:
+Recommended format (use this exactly):
 
 | Severity | Location | Category | Finding | Risk | Fix |
 |---|---|---|---|---|---|
-| High | src/config.ts:18 | Security | SQL injection via unsanitized query | Database compromise | Use parameterized queries |
+| Critical | src/auth.ts:42 | Security | SQL injection in query builder | Database takeover | Use parameterized queries |
+| High | lib/api.ts:87 | Correctness | Missing null check on user.id | NullPointerException | Add: if (!user?.id) return error |
 
-**Important**: Use the file:line notation (e.g., `src/auth.ts:45` or `lib/utils.py (line 12)`) in the Location column so that automated tools can post comments at specific lines.
+**Critical Rule**: Location field must ALWAYS have the format `path/to/file.ext:LINE_NUMBER`. No exceptions.
 
 Section 2: Open Questions / Assumptions
 - Include only when evidence is incomplete.
@@ -96,7 +101,7 @@ Section 3: Change Summary
 - Mention overall risk posture and test confidence.
 
 If no findings are discovered:
-- State that explicitly.
+- State that explicitly: "No significant findings."
 - Add residual risks or testing gaps still worth validating.
 
 ## Reviewer Defaults
