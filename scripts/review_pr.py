@@ -203,12 +203,38 @@ def post_review_comments(
     github_token: str,
     findings: list[tuple[str, int, str]],
 ) -> None:
-    """Placeholder for line-level comments (not currently used).
+    """Post fresh line-level comments for each commit.
     
-    GitHub's API restricts line-level comments to lines actually in the diff.
-    All findings are included in the main summary comment instead.
+    Each commit gets a new set of line-level comments based on current diff lines.
+    These are separate from the unified summary comment.
     """
-    pass
+    if not findings:
+        return
+    
+    print(f"[DEBUG] Posting {len(findings)} line-level review comments...")
+    
+    for file_path, line_num, finding_text in findings:
+        # Clean up finding text
+        comment_body = finding_text.replace("|", "").strip()
+        if not comment_body or len(comment_body) < 3:
+            continue
+        
+        payload = {
+            "commit_sha": pr_sha,
+            "path": file_path,
+            "line": line_num,
+            "side": "RIGHT",
+            "body": f"🔍 {comment_body[:500]}",
+        }
+        
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+        try:
+            gh_post(url, github_token, payload)
+            print(f"[DEBUG] ✓ Posted line comment at {file_path}:{line_num}")
+        except RuntimeError as e:
+            # Line might not be in diff - silently continue
+            print(f"[DEBUG] Could not post at {file_path}:{line_num} (may not be in diff)")
+            continue
 
 
 def main() -> int:
@@ -259,7 +285,7 @@ def main() -> int:
                 print(f"  - {file_path}:{line_num}")
         return 0
 
-    # Find existing review comment or create new one
+    # Find existing review comment or create new one (unified summary)
     existing_comment = find_existing_review_comment(comments)
     
     if existing_comment:
@@ -273,8 +299,10 @@ def main() -> int:
         gh_post(comments_url, github_token, {"body": body})
         print(f"Posted review comment to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
     
-    # Parse findings (for logging only, not for posting)
-    print(f"\n[DEBUG] Review includes {len(parse_findings_with_locations(review_md))} line-level findings")
+    # Post fresh line-level comments for this commit
+    findings = parse_findings_with_locations(review_md)
+    if findings:
+        post_review_comments(owner, repo, pr_number, pr_sha, github_token, findings)
     
     return 0
 
