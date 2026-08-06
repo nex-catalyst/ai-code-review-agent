@@ -105,7 +105,8 @@ def call_llm(skill_text: str, patch_blob: str, model: str, base_url: str, api_ke
         "Content-Type": "application/json",
     }
 
-    resp = requests.post(base_url, headers=headers, data=json.dumps(payload), timeout=90)
+    endpoint_url = f"{base_url}/chat/completions" if not base_url.endswith("/chat/completions") else base_url
+    resp = requests.post(endpoint_url, headers=headers, data=json.dumps(payload), timeout=90)
     if resp.status_code >= 400:
         raise RuntimeError(f"LLM call failed {resp.status_code}: {resp.text[:300]}")
 
