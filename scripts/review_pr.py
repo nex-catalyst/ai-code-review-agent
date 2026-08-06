@@ -203,20 +203,56 @@ def post_review_comments(
     github_token: str,
     findings: list[tuple[str, int, str]],
 ) -> None:
-    """Post fresh line-level comments for each commit.
+    """Post fresh line-level comments for each commit, avoiding duplicates.
     
-    Each commit gets a new set of line-level comments based on current diff lines.
-    These are separate from the unified summary comment.
+    - Each commit gets new line-level comments based on current diff lines
+    - Checks if identical comment already exists at that line/file
+    - Skips posting if same finding already commented
     """
     if not findings:
         return
     
-    print(f"[DEBUG] Posting {len(findings)} line-level review comments...")
+    print(f"[DEBUG] Processing {len(findings)} line-level findings...")
+    
+    # Get existing PR comments to check for duplicates
+    pr_comments_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
+    try:
+        existing_comments = gh_get(pr_comments_url, github_token, params={"per_page": 100})
+        if not isinstance(existing_comments, list):
+            existing_comments = []
+    except RuntimeError:
+        existing_comments = []
+    
+    # Build a set of (file_path, line_num) -> comment_body for existing comments
+    existing_by_location: dict[tuple[str, int], set[str]] = {}
+    for comment in existing_comments:
+        file_path = comment.get("path", "")
+        line = comment.get("line")
+        body = str(comment.get("body", "")).lower()
+        
+        if file_path and line:
+            key = (file_path, line)
+            if key not in existing_by_location:
+                existing_by_location[key] = set()
+            existing_by_location[key].add(body)
+    
+    # Post line comments, skipping duplicates
+    posted_count = 0
+    skipped_count = 0
     
     for file_path, line_num, finding_text in findings:
-        # Clean up finding text
         comment_body = finding_text.replace("|", "").strip()
         if not comment_body or len(comment_body) < 3:
+            continue
+        
+        # Check if identical comment already exists at this location
+        key = (file_path, line_num)
+        existing_bodies = existing_by_location.get(key, set())
+        body_normalized = comment_body.lower()
+        
+        if any(body_normalized in existing_body for existing_body in existing_bodies):
+            print(f"[DEBUG] ⊘ Skipping duplicate comment at {file_path}:{line_num}")
+            skipped_count += 1
             continue
         
         payload = {
@@ -231,10 +267,13 @@ def post_review_comments(
         try:
             gh_post(url, github_token, payload)
             print(f"[DEBUG] ✓ Posted line comment at {file_path}:{line_num}")
+            posted_count += 1
         except RuntimeError as e:
             # Line might not be in diff - silently continue
             print(f"[DEBUG] Could not post at {file_path}:{line_num} (may not be in diff)")
             continue
+    
+    print(f"[DEBUG] Line comments: {posted_count} posted, {skipped_count} skipped (duplicates)")
 
 
 def main() -> int:
