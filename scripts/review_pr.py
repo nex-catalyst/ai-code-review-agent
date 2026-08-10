@@ -381,7 +381,7 @@ def post_review_comments(
             continue
         
         payload = {
-            "commit_sha": pr_sha,
+            "commit_id": pr_sha,
             "path": file_path,
             "line": target_line,
             "side": "RIGHT",
