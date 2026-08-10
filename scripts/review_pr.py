@@ -16,6 +16,7 @@ import requests
 
 MAX_FILES = 80
 MAX_PATCH_CHARS = 120_000
+MAX_INLINE_COMMENT_CHARS = 6000
 
 
 def env_required(name: str) -> str:
@@ -124,6 +125,35 @@ def nearest_commentable_line(target: int, commentable: list[int]) -> int | None:
     if abs(before - target) <= abs(after - target):
         return before
     return after
+
+
+def format_finding_comment(finding_text: str) -> str:
+    """Format a parsed finding line into a readable inline PR comment body.
+
+    Supports markdown table rows from the review output and bolds severity.
+    """
+    raw = finding_text.strip()
+    if not raw:
+        return ""
+
+    if raw.startswith("|") and raw.endswith("|"):
+        cells = [c.strip() for c in raw.strip("|").split("|")]
+        if len(cells) >= 6:
+            severity, _location, category, finding, risk, fix = cells[:6]
+            parts = [f"**{severity}** - {category}: {finding}"]
+            if risk:
+                parts.append(f"Risk: {risk}")
+            if fix:
+                parts.append(f"Fix: {fix}")
+            return "\n\n".join(parts)
+
+    m = re.match(r"^(Critical|High|Medium|Low)\b\s*[:-]?\s*(.*)$", raw, re.IGNORECASE)
+    if m:
+        sev = m.group(1).capitalize()
+        rest = m.group(2).strip()
+        return f"**{sev}** - {rest}" if rest else f"**{sev}**"
+
+    return raw
 
 
 def gh_get_paginated(url: str, token: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -348,7 +378,7 @@ def post_review_comments(
     
     for raw_file_path, line_num, finding_text in findings:
         file_path = normalize_file_path(raw_file_path)
-        comment_body = finding_text.replace("|", "").strip()
+        comment_body = format_finding_comment(finding_text)
         if not comment_body or len(comment_body) < 3:
             continue
 
@@ -385,7 +415,7 @@ def post_review_comments(
             "path": file_path,
             "line": target_line,
             "side": "RIGHT",
-            "body": f"🔍 {comment_body[:500]}",
+            "body": f"🔍 {comment_body[:MAX_INLINE_COMMENT_CHARS]}",
         }
         
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
