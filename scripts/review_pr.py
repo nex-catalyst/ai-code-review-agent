@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from bisect import bisect_left
 from typing import Any
 
 import requests
@@ -56,6 +57,73 @@ def gh_patch(url: str, token: str, payload: dict[str, Any]) -> Any:
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
+
+
+def normalize_file_path(path: str) -> str:
+    return path.strip().strip("`").removeprefix("./")
+
+
+def extract_commentable_lines_from_patch(patch: str) -> set[int]:
+    """Parse a unified diff patch and return valid RIGHT-side line numbers."""
+    commentable: set[int] = set()
+    if not patch:
+        return commentable
+
+    current_new_line: int | None = None
+    hunk_header_re = re.compile(r"^@@\s+-\d+(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@")
+
+    for raw_line in patch.splitlines():
+        m = hunk_header_re.match(raw_line)
+        if m:
+            current_new_line = int(m.group(1))
+            continue
+        if current_new_line is None:
+            continue
+
+        if raw_line.startswith("+"):
+            commentable.add(current_new_line)
+            current_new_line += 1
+        elif raw_line.startswith(" "):
+            commentable.add(current_new_line)
+            current_new_line += 1
+        elif raw_line.startswith("-"):
+            # Deletion lines exist only on the LEFT side; don't advance new line.
+            continue
+        else:
+            # Ignore meta lines like "\\ No newline at end of file".
+            continue
+
+    return commentable
+
+
+def build_commentable_line_map(files: list[dict[str, Any]]) -> dict[str, list[int]]:
+    """Build {path -> sorted RIGHT-side line numbers} from file patches."""
+    line_map: dict[str, list[int]] = {}
+    for f in files:
+        path = normalize_file_path(str(f.get("filename") or ""))
+        patch = str(f.get("patch") or "")
+        if not path:
+            continue
+        lines = sorted(extract_commentable_lines_from_patch(patch))
+        if lines:
+            line_map[path] = lines
+    return line_map
+
+
+def nearest_commentable_line(target: int, commentable: list[int]) -> int | None:
+    """Return nearest valid diff line to target."""
+    if not commentable:
+        return None
+    idx = bisect_left(commentable, target)
+    if idx == 0:
+        return commentable[0]
+    if idx == len(commentable):
+        return commentable[-1]
+    before = commentable[idx - 1]
+    after = commentable[idx]
+    if abs(before - target) <= abs(after - target):
+        return before
+    return after
 
 
 def gh_get_paginated(url: str, token: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -210,7 +278,7 @@ def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
             file_path, line_num_str = match1.groups()
             try:
                 line_num = int(line_num_str)
-                findings.append((file_path, line_num, line.strip()))
+                findings.append((normalize_file_path(file_path), line_num, line.strip()))
             except ValueError:
                 continue
         
@@ -220,7 +288,7 @@ def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
             file_path, line_num_str = match2.groups()
             try:
                 line_num = int(line_num_str)
-                findings.append((file_path, line_num, line.strip()))
+                findings.append((normalize_file_path(file_path), line_num, line.strip()))
             except ValueError:
                 continue
     
@@ -239,6 +307,7 @@ def post_review_comments(
     pr_sha: str,
     github_token: str,
     findings: list[tuple[str, int, str]],
+    commentable_line_map: dict[str, list[int]],
 ) -> None:
     """Post fresh line-level comments for each commit, avoiding duplicates.
     
@@ -274,14 +343,35 @@ def post_review_comments(
     # Post line comments, skipping duplicates
     posted_count = 0
     skipped_count = 0
+    remapped_count = 0
+    failed_count = 0
     
-    for file_path, line_num, finding_text in findings:
+    for raw_file_path, line_num, finding_text in findings:
+        file_path = normalize_file_path(raw_file_path)
         comment_body = finding_text.replace("|", "").strip()
         if not comment_body or len(comment_body) < 3:
             continue
+
+        # GitHub only accepts RIGHT-side lines that are present in diff hunks.
+        commentable = commentable_line_map.get(file_path, [])
+        if not commentable:
+            print(f"[DEBUG] ⊘ Skipping {file_path}:{line_num} (file has no commentable diff lines)")
+            failed_count += 1
+            continue
+
+        target_line = line_num
+        if target_line not in set(commentable):
+            nearest = nearest_commentable_line(target_line, commentable)
+            if nearest is None:
+                print(f"[DEBUG] ⊘ Skipping {file_path}:{line_num} (no valid diff line found)")
+                failed_count += 1
+                continue
+            print(f"[DEBUG] ↺ Remapping {file_path}:{line_num} to nearest diff line {nearest}")
+            target_line = nearest
+            remapped_count += 1
         
         # Check if identical comment already exists at this location
-        key = (file_path, line_num)
+        key = (file_path, target_line)
         existing_bodies = existing_by_location.get(key, set())
         body_normalized = comment_body.lower()
         
@@ -293,7 +383,7 @@ def post_review_comments(
         payload = {
             "commit_sha": pr_sha,
             "path": file_path,
-            "line": line_num,
+            "line": target_line,
             "side": "RIGHT",
             "body": f"🔍 {comment_body[:500]}",
         }
@@ -301,14 +391,20 @@ def post_review_comments(
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
         try:
             gh_post(url, github_token, payload)
-            print(f"[DEBUG] ✓ Posted line comment at {file_path}:{line_num}")
+            print(f"[DEBUG] ✓ Posted line comment at {file_path}:{target_line}")
             posted_count += 1
+            if key not in existing_by_location:
+                existing_by_location[key] = set()
+            existing_by_location[key].add(body_normalized)
         except RuntimeError as e:
-            # Line might not be in diff - silently continue
-            print(f"[DEBUG] Could not post at {file_path}:{line_num} (may not be in diff)")
+            print(f"[DEBUG] Could not post at {file_path}:{target_line}: {str(e)[:180]}")
+            failed_count += 1
             continue
     
-    print(f"[DEBUG] Line comments: {posted_count} posted, {skipped_count} skipped (duplicates)")
+    print(
+        f"[DEBUG] Line comments: {posted_count} posted, {skipped_count} skipped (duplicates), "
+        f"{remapped_count} remapped, {failed_count} failed"
+    )
 
 
 def main() -> int:
@@ -358,6 +454,8 @@ def main() -> int:
 
     skill_text = read_text(skill_path)
     patch_blob = build_patch_blob(pr, files)
+    commentable_line_map = build_commentable_line_map(files)
+    print(f"[DEBUG] Built commentable line map for {len(commentable_line_map)} files")
     review_md = call_llm(skill_text, patch_blob, llm_model, llm_base_url, llm_api_key)
 
     if dry_run:
@@ -376,7 +474,15 @@ def main() -> int:
     # Post line-level comments for this review scope.
     findings = parse_findings_with_locations(review_md)
     if findings:
-        post_review_comments(owner, repo, pr_number, pr_sha, github_token, findings)
+        post_review_comments(
+            owner,
+            repo,
+            pr_number,
+            pr_sha,
+            github_token,
+            findings,
+            commentable_line_map,
+        )
     else:
         print("No line-level findings parsed. Nothing to post.")
     
