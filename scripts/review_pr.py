@@ -13,7 +13,6 @@ from typing import Any
 
 import requests
 
-MARKER_PREFIX = "<!-- code-review-pro:"
 MAX_FILES = 80
 MAX_PATCH_CHARS = 120_000
 
@@ -59,19 +58,57 @@ def read_text(path: str) -> str:
         return fh.read()
 
 
-def has_marker(comments: list[dict[str, Any]], sha: str) -> bool:
-    marker = f"{MARKER_PREFIX}{sha} -->"
-    return any(marker in str(c.get("body") or "") for c in comments)
+def gh_get_paginated(url: str, token: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Fetch all pages for list endpoints using a page/per_page strategy."""
+    page = 1
+    per_page = 100
+    items: list[dict[str, Any]] = []
+    while True:
+        q: dict[str, Any] = {"page": page, "per_page": per_page}
+        if params:
+            q.update(params)
+        data = gh_get(url, token, params=q)
+        if not isinstance(data, list):
+            break
+        items.extend(data)
+        if len(data) < per_page:
+            break
+        page += 1
+    return items
 
 
-def find_existing_review_comment(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Find our existing code-review-pro comment (by marker, any PR version)."""
-    marker_start = MARKER_PREFIX
-    for comment in comments:
-        body = str(comment.get("body") or "")
-        if body.startswith(marker_start):
-            return comment
-    return None
+def validate_token_identity(token: str, expected_login: str) -> None:
+    """Fail fast if the configured token is not the expected reviewer identity."""
+    me = gh_get("https://api.github.com/user", token)
+    login = str((me or {}).get("login") or "").strip()
+    if not login:
+        raise RuntimeError("Unable to resolve token identity from GitHub /user endpoint")
+
+    print(f"Authenticated GitHub reviewer identity: {login}")
+    if expected_login and login.lower() != expected_login.lower():
+        raise RuntimeError(
+            "Token identity mismatch: "
+            f"expected '{expected_login}' but authenticated as '{login}'"
+        )
+
+
+def get_latest_commit_files(owner: str, repo: str, pr_sha: str, token: str) -> tuple[list[dict[str, Any]], str | None]:
+    """Return files changed in the PR head commit (latest commit only)."""
+    commit_url = f"https://api.github.com/repos/{owner}/{repo}/commits/{pr_sha}"
+    commit_data = gh_get(commit_url, token, params={"per_page": 100})
+    if not isinstance(commit_data, dict):
+        return [], None
+
+    files = commit_data.get("files")
+    if not isinstance(files, list):
+        files = []
+
+    parent_sha: str | None = None
+    parents = commit_data.get("parents")
+    if isinstance(parents, list) and parents:
+        parent_sha = str((parents[0] or {}).get("sha") or "").strip() or None
+
+    return files, parent_sha
 
 
 def build_patch_blob(pr: dict[str, Any], files: list[dict[str, Any]]) -> str:
@@ -214,12 +251,10 @@ def post_review_comments(
     
     print(f"[DEBUG] Processing {len(findings)} line-level findings...")
     
-    # Get existing PR comments to check for duplicates
+    # Get existing PR comments to check for duplicates.
     pr_comments_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
     try:
-        existing_comments = gh_get(pr_comments_url, github_token, params={"per_page": 100})
-        if not isinstance(existing_comments, list):
-            existing_comments = []
+        existing_comments = gh_get_paginated(pr_comments_url, github_token)
     except RuntimeError:
         existing_comments = []
     
@@ -250,7 +285,7 @@ def post_review_comments(
         existing_bodies = existing_by_location.get(key, set())
         body_normalized = comment_body.lower()
         
-        if any(body_normalized in existing_body for existing_body in existing_bodies):
+        if body_normalized in existing_bodies:
             print(f"[DEBUG] ⊘ Skipping duplicate comment at {file_path}:{line_num}")
             skipped_count += 1
             continue
@@ -286,37 +321,48 @@ def main() -> int:
     pr_number = int(env_required("PR_NUMBER"))
     pr_sha = env_required("PR_SHA")
     skill_path = os.getenv("SKILL_PATH", ".github/skills/code-review-pro/SKILL.md").strip()
+    review_scope = os.getenv("REVIEW_SCOPE", "latest_commit").strip().lower() or "latest_commit"
+    comment_mode = os.getenv("COMMENT_MODE", "inline_only").strip().lower() or "inline_only"
+    expected_reviewer_login = os.getenv("GITHUB_TOKEN_EXPECTED_LOGIN", "").strip()
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
     owner, repo = repo_full.split("/", 1)
     pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
     files_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
-    comments_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+
+    validate_token_identity(github_token, expected_reviewer_login)
 
     pr = gh_get(pr_url, github_token)
     if bool(pr.get("draft")):
         print("Draft PR detected. Skipping review.")
         return 0
 
-    comments = gh_get(comments_url, github_token, params={"per_page": 100})
-    if not isinstance(comments, list):
-        comments = []
+    files: list[dict[str, Any]] = []
+    if review_scope == "latest_commit":
+        files, parent_sha = get_latest_commit_files(owner, repo, pr_sha, github_token)
+        if parent_sha:
+            print(f"Review scope: latest_commit ({parent_sha[:8]}..{pr_sha[:8]})")
+        else:
+            print(f"Review scope: latest_commit ({pr_sha[:8]})")
+    elif review_scope == "full_pr":
+        listed = gh_get(files_url, github_token, params={"per_page": 100})
+        if isinstance(listed, list):
+            files = listed
+        print("Review scope: full_pr")
+    else:
+        raise RuntimeError(f"Unsupported REVIEW_SCOPE: {review_scope}")
 
-    files = gh_get(files_url, github_token, params={"per_page": 100})
-    if not isinstance(files, list) or not files:
-        print("No changed files detected. Skipping.")
+    if not files:
+        print("No changed files detected in selected review scope. Skipping.")
         return 0
 
     skill_text = read_text(skill_path)
     patch_blob = build_patch_blob(pr, files)
     review_md = call_llm(skill_text, patch_blob, llm_model, llm_base_url, llm_api_key)
 
-    marker = f"{MARKER_PREFIX}{pr_sha} -->"
-    body = f"{marker}\n## Automated Code Review (code-review-pro)\n\n{review_md}"
-
     if dry_run:
-        print("DRY_RUN enabled. Would post/update review comment:")
-        print(body[:1200])
+        print("DRY_RUN enabled. Would post inline review comments only.")
+        print(review_md[:1200])
         findings = parse_findings_with_locations(review_md)
         if findings:
             print(f"\nFound {len(findings)} line-level findings in output")
@@ -324,24 +370,15 @@ def main() -> int:
                 print(f"  - {file_path}:{line_num}")
         return 0
 
-    # Find existing review comment or create new one (unified summary)
-    existing_comment = find_existing_review_comment(comments)
-    
-    if existing_comment:
-        # Update existing comment
-        comment_id = existing_comment.get("id")
-        comment_url = f"https://api.github.com/repos/{owner}/{repo}/issues/comments/{comment_id}"
-        gh_patch(comment_url, github_token, {"body": body})
-        print(f"Updated review comment on {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
-    else:
-        # Post new comment
-        gh_post(comments_url, github_token, {"body": body})
-        print(f"Posted review comment to {repo_full} PR #{pr_number} for SHA {pr_sha[:8]}")
-    
-    # Post fresh line-level comments for this commit
+    if comment_mode != "inline_only":
+        raise RuntimeError(f"Unsupported COMMENT_MODE: {comment_mode}")
+
+    # Post line-level comments for this review scope.
     findings = parse_findings_with_locations(review_md)
     if findings:
         post_review_comments(owner, repo, pr_number, pr_sha, github_token, findings)
+    else:
+        print("No line-level findings parsed. Nothing to post.")
     
     return 0
 

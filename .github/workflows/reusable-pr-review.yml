@@ -19,6 +19,18 @@ on:
         required: false
         type: boolean
         default: false
+      review_scope:
+        required: false
+        type: string
+        default: latest_commit
+      comment_mode:
+        required: false
+        type: string
+        default: inline_only
+      expected_reviewer_login:
+        required: false
+        type: string
+        default: ""
     secrets:
       CENTRAL_REVIEW_GH_TOKEN:
         required: true
@@ -28,7 +40,6 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
 
 jobs:
   run-review:
@@ -53,10 +64,13 @@ jobs:
         working-directory: ai-code-review-agent
         env:
           GITHUB_TOKEN: ${{ secrets.CENTRAL_REVIEW_GH_TOKEN }}
+          GITHUB_TOKEN_EXPECTED_LOGIN: ${{ inputs.expected_reviewer_login }}
           LLM_API_KEY: ${{ secrets.CENTRAL_REVIEW_LLM_API_KEY }}
           LLM_MODEL: ${{ inputs.llm_model }}
           LLM_BASE_URL: ${{ inputs.llm_base_url }}
           DRY_RUN: ${{ inputs.dry_run }}
+          REVIEW_SCOPE: ${{ inputs.review_scope }}
+          COMMENT_MODE: ${{ inputs.comment_mode }}
           TARGET_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_SHA: ${{ github.event.pull_request.head.sha }}
