@@ -17,6 +17,7 @@ import requests
 MAX_FILES = 80
 MAX_PATCH_CHARS = 120_000
 MAX_INLINE_COMMENT_CHARS = 6000
+MAX_LINE_REMAP_DELTA = 2
 
 
 def env_required(name: str) -> str:
@@ -127,6 +128,24 @@ def nearest_commentable_line(target: int, commentable: list[int]) -> int | None:
     return after
 
 
+def choose_comment_line(target: int, commentable: list[int]) -> tuple[int | None, bool]:
+    """Return a comment line and whether it was remapped.
+
+    To avoid scattered comments, remap only when the nearest diff line is close
+    to the requested target line.
+    """
+    if not commentable:
+        return None, False
+    if target in set(commentable):
+        return target, False
+    nearest = nearest_commentable_line(target, commentable)
+    if nearest is None:
+        return None, False
+    if abs(nearest - target) > MAX_LINE_REMAP_DELTA:
+        return None, False
+    return nearest, True
+
+
 def format_finding_comment(finding_text: str) -> str:
     """Format a parsed finding line into a readable inline PR comment body.
 
@@ -142,9 +161,9 @@ def format_finding_comment(finding_text: str) -> str:
             severity, _location, category, finding, risk, fix = cells[:6]
             parts = [f"**{severity}** - {category}: {finding}"]
             if risk:
-                parts.append(f"Risk: {risk}")
+                parts.append(f"**Risk:** {risk}")
             if fix:
-                parts.append(f"Fix: {fix}")
+                parts.append(f"**Fix:** {fix}")
             return "\n\n".join(parts)
 
     m = re.match(r"^(Critical|High|Medium|Low)\b\s*[:-]?\s*(.*)$", raw, re.IGNORECASE)
@@ -389,15 +408,18 @@ def post_review_comments(
             failed_count += 1
             continue
 
-        target_line = line_num
-        if target_line not in set(commentable):
-            nearest = nearest_commentable_line(target_line, commentable)
-            if nearest is None:
-                print(f"[DEBUG] ⊘ Skipping {file_path}:{line_num} (no valid diff line found)")
-                failed_count += 1
-                continue
-            print(f"[DEBUG] ↺ Remapping {file_path}:{line_num} to nearest diff line {nearest}")
-            target_line = nearest
+        chosen_line, was_remapped = choose_comment_line(line_num, commentable)
+        if chosen_line is None:
+            print(
+                f"[DEBUG] ⊘ Skipping {file_path}:{line_num} "
+                f"(no exact/near diff line within +/-{MAX_LINE_REMAP_DELTA})"
+            )
+            failed_count += 1
+            continue
+
+        target_line = chosen_line
+        if was_remapped:
+            print(f"[DEBUG] ↺ Remapping {file_path}:{line_num} to nearest diff line {target_line}")
             remapped_count += 1
         
         # Check if identical comment already exists at this location
