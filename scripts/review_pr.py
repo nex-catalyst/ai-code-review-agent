@@ -18,6 +18,7 @@ MAX_FILES = 80
 MAX_PATCH_CHARS = 120_000
 MAX_INLINE_COMMENT_CHARS = 6000
 MAX_LINE_REMAP_DELTA = 2
+BOT_COMMENT_MARKER = "<!-- ai-code-review-agent -->"
 
 
 def env_required(name: str) -> str:
@@ -56,6 +57,34 @@ def gh_patch(url: str, token: str, payload: dict[str, Any]) -> Any:
     return resp.json()
 
 
+def gh_graphql(token: str, query: str, variables: dict[str, Any]) -> Any:
+        resp = requests.post(
+                "https://api.github.com/graphql",
+                headers=gh_headers(token),
+                json={"query": query, "variables": variables},
+                timeout=30,
+        )
+        if resp.status_code >= 400:
+                raise RuntimeError(f"GitHub GraphQL failed {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        if data.get("errors"):
+                raise RuntimeError(f"GitHub GraphQL errors: {str(data.get('errors'))[:300]}")
+        return data.get("data")
+
+
+def minimize_comment(token: str, node_id: str, classifier: str = "OUTDATED") -> None:
+        mutation = """
+        mutation MinimizeComment($subjectId: ID!, $classifier: ReportedContentClassifiers!) {
+            minimizeComment(input: {subjectId: $subjectId, classifier: $classifier}) {
+                minimizedComment {
+                    isMinimized
+                }
+            }
+        }
+        """
+        gh_graphql(token, mutation, {"subjectId": node_id, "classifier": classifier})
+
+
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read()
@@ -63,6 +92,20 @@ def read_text(path: str) -> str:
 
 def normalize_file_path(path: str) -> str:
     return path.strip().strip("`").removeprefix("./")
+
+
+def normalize_comment_body_for_compare(body: str) -> str:
+    text = body.replace(BOT_COMMENT_MARKER, "")
+    text = text.removeprefix("🔍 ").strip().lower()
+    return re.sub(r"\s+", " ", text)
+
+
+def is_managed_bot_comment(comment: dict[str, Any], reviewer_login: str) -> bool:
+    body = str(comment.get("body") or "")
+    user_login = str(((comment.get("user") or {}).get("login") or "")).strip().lower()
+    if reviewer_login and user_login != reviewer_login.lower():
+        return False
+    return BOT_COMMENT_MARKER in body or body.startswith("🔍 ")
 
 
 def extract_commentable_lines_from_patch(patch: str) -> set[int]:
@@ -194,7 +237,7 @@ def gh_get_paginated(url: str, token: str, params: dict[str, Any] | None = None)
     return items
 
 
-def validate_token_identity(token: str, expected_login: str) -> None:
+def validate_token_identity(token: str, expected_login: str) -> str:
     """Fail fast if the configured token is not the expected reviewer identity."""
     me = gh_get("https://api.github.com/user", token)
     login = str((me or {}).get("login") or "").strip()
@@ -207,6 +250,7 @@ def validate_token_identity(token: str, expected_login: str) -> None:
             "Token identity mismatch: "
             f"expected '{expected_login}' but authenticated as '{login}'"
         )
+    return login
 
 
 def get_latest_commit_files(owner: str, repo: str, pr_sha: str, token: str) -> tuple[list[dict[str, Any]], str | None]:
@@ -386,8 +430,10 @@ def post_review_comments(
     pr_number: int,
     pr_sha: str,
     github_token: str,
+    reviewer_login: str,
     findings: list[tuple[str, int, str]],
     commentable_line_map: dict[str, list[int]],
+    moderate_cleanup_enabled: bool,
 ) -> None:
     """Post fresh line-level comments for each commit, avoiding duplicates.
     
@@ -412,7 +458,7 @@ def post_review_comments(
     for comment in existing_comments:
         file_path = comment.get("path", "")
         line = comment.get("line")
-        body = str(comment.get("body", "")).lower()
+        body = normalize_comment_body_for_compare(str(comment.get("body", "")))
         
         if file_path and line:
             key = (file_path, line)
@@ -425,6 +471,8 @@ def post_review_comments(
     skipped_count = 0
     remapped_count = 0
     failed_count = 0
+    minimized_count = 0
+    active_fingerprints: set[tuple[str, int, str]] = set()
     
     for raw_file_path, line_num, finding_text in findings:
         file_path = normalize_file_path(raw_file_path)
@@ -456,7 +504,8 @@ def post_review_comments(
         # Check if identical comment already exists at this location
         key = (file_path, target_line)
         existing_bodies = existing_by_location.get(key, set())
-        body_normalized = comment_body.lower()
+        body_normalized = normalize_comment_body_for_compare(comment_body)
+        active_fingerprints.add((file_path, target_line, body_normalized))
         
         if body_normalized in existing_bodies:
             print(f"[DEBUG] ⊘ Skipping duplicate comment at {file_path}:{line_num}")
@@ -468,7 +517,7 @@ def post_review_comments(
             "path": file_path,
             "line": target_line,
             "side": "RIGHT",
-            "body": f"🔍 {comment_body[:MAX_INLINE_COMMENT_CHARS]}",
+            "body": f"🔍 {comment_body[:MAX_INLINE_COMMENT_CHARS]}\n\n{BOT_COMMENT_MARKER}",
         }
         
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/comments"
@@ -483,10 +532,37 @@ def post_review_comments(
             print(f"[DEBUG] Could not post at {file_path}:{target_line}: {str(e)[:180]}")
             failed_count += 1
             continue
+
+    if moderate_cleanup_enabled:
+        for comment in existing_comments:
+            if not is_managed_bot_comment(comment, reviewer_login):
+                continue
+            if bool(comment.get("minimized")):
+                continue
+
+            file_path = normalize_file_path(str(comment.get("path") or ""))
+            line = comment.get("line")
+            if not file_path or not isinstance(line, int):
+                continue
+
+            body_norm = normalize_comment_body_for_compare(str(comment.get("body") or ""))
+            fingerprint = (file_path, line, body_norm)
+            if fingerprint in active_fingerprints:
+                continue
+
+            node_id = str(comment.get("node_id") or "").strip()
+            if not node_id:
+                continue
+
+            try:
+                minimize_comment(github_token, node_id, classifier="OUTDATED")
+                minimized_count += 1
+            except RuntimeError as e:
+                print(f"[DEBUG] Could not minimize comment {comment.get('id')}: {str(e)[:180]}")
     
     print(
         f"[DEBUG] Line comments: {posted_count} posted, {skipped_count} skipped (duplicates), "
-        f"{remapped_count} remapped, {failed_count} failed"
+        f"{remapped_count} remapped, {failed_count} failed, {minimized_count} minimized (outdated)"
     )
 
 
@@ -503,6 +579,7 @@ def main() -> int:
     review_scope = os.getenv("REVIEW_SCOPE", "latest_commit").strip().lower() or "latest_commit"
     comment_mode = os.getenv("COMMENT_MODE", "inline_only").strip().lower() or "inline_only"
     merge_gate_enabled = os.getenv("MERGE_GATE_ENABLED", "true").strip().lower() == "true"
+    moderate_cleanup_enabled = os.getenv("MODERATE_CLEANUP_ENABLED", "true").strip().lower() == "true"
     raw_blocking = os.getenv("MERGE_GATE_SEVERITIES", "critical,high")
     blocking_severities = {
         s.strip().lower() for s in raw_blocking.split(",") if s.strip()
@@ -514,7 +591,7 @@ def main() -> int:
     pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
     files_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
 
-    validate_token_identity(github_token, expected_reviewer_login)
+    reviewer_login = validate_token_identity(github_token, expected_reviewer_login)
 
     pr = gh_get(pr_url, github_token)
     if bool(pr.get("draft")):
@@ -568,8 +645,10 @@ def main() -> int:
             pr_number,
             pr_sha,
             github_token,
+            reviewer_login,
             findings,
             commentable_line_map,
+            moderate_cleanup_enabled,
         )
     else:
         print("No line-level findings parsed. Nothing to post.")
