@@ -39,6 +39,7 @@ Then open a new Copilot Chat session and use `/code-review-pro`.
 - Default review scope is `latest_commit`.
 - Default comment mode is `inline_only` (GitHub PR review line comments).
 - `llm_model` and `llm_base_url` are centralized in the reusable workflow and are not caller workflow inputs.
+- Reusable review job runs only for internal pull requests (head repository must match base repository); fork-origin PRs are skipped.
 - Review comments are deduplicated at `(file, line, body)`.
 - Reviewer identity is provided by `CENTRAL_REVIEW_GH_TOKEN`.
 - Optional `expected_reviewer_login` input enforces token identity before posting.

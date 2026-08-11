@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   run-review:
-    if: github.event_name == 'pull_request' && (inputs.target_base_branch == '' || github.base_ref == inputs.target_base_branch)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (inputs.target_base_branch == '' || github.base_ref == inputs.target_base_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout central agent repository
