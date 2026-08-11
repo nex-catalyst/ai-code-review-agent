@@ -4,22 +4,27 @@ on:
   workflow_call:
     inputs:
       target_base_branch:
+        description: "Optional base branch filter. Empty means run for PRs targeting any base branch."
         required: false
         type: string
         default: ""
       dry_run:
+        description: "If true, generate review output without posting PR comments."
         required: false
         type: boolean
         default: false
       review_scope:
+        description: "Review scope. latest_commit is default; full_pr is optional override."
         required: false
         type: string
         default: latest_commit
       comment_mode:
+        description: "Comment mode. inline_only posts line-level PR comments only."
         required: false
         type: string
         default: inline_only
       expected_reviewer_login:
+        description: "Optional identity guard for CENTRAL_REVIEW_GH_TOKEN login."
         required: false
         type: string
         default: ""
@@ -58,6 +63,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CENTRAL_REVIEW_GH_TOKEN }}
           GITHUB_TOKEN_EXPECTED_LOGIN: ${{ inputs.expected_reviewer_login }}
           LLM_API_KEY: ${{ secrets.CENTRAL_REVIEW_LLM_API_KEY }}
+          # Centralized defaults: callers must not pass llm_model/llm_base_url.
           LLM_MODEL: gpt-oss-120b
           LLM_BASE_URL: http://litellm-alb-1953047705.us-east-1.elb.amazonaws.com/v1
           DRY_RUN: ${{ inputs.dry_run }}
