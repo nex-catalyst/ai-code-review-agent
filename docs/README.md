@@ -35,9 +35,10 @@ Then open a new Copilot Chat session and use `/code-review-pro`.
 
 ## Notes
 
-- Default review target branch is `develop`.
+- Default review target branch is any branch (`target_base_branch` defaults to empty and applies no base-branch filter).
 - Default review scope is `latest_commit`.
 - Default comment mode is `inline_only` (GitHub PR review line comments).
+- `llm_model` and `llm_base_url` are centralized in the reusable workflow and are not caller workflow inputs.
 - Review comments are deduplicated at `(file, line, body)`.
 - Reviewer identity is provided by `CENTRAL_REVIEW_GH_TOKEN`.
 - Optional `expected_reviewer_login` input enforces token identity before posting.
