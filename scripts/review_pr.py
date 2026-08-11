@@ -349,6 +349,37 @@ def parse_findings_with_locations(review_md: str) -> list[tuple[str, int, str]]:
     return findings
 
 
+def extract_severity_and_location(line: str) -> tuple[str, str] | None:
+    """Extract severity/location from a markdown table row if present."""
+    row = line.strip()
+    if not (row.startswith("|") and row.endswith("|")):
+        return None
+
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    if len(cells) < 2:
+        return None
+
+    sev = cells[0].capitalize()
+    if sev not in {"Critical", "High", "Medium", "Low"}:
+        return None
+
+    location = cells[1]
+    return sev, location
+
+
+def collect_blocking_findings(review_md: str, blocking_severities: set[str]) -> list[tuple[str, str]]:
+    """Collect findings that match blocking severities from the review markdown."""
+    blocked: list[tuple[str, str]] = []
+    for line in review_md.splitlines():
+        parsed = extract_severity_and_location(line)
+        if not parsed:
+            continue
+        sev, location = parsed
+        if sev.lower() in blocking_severities:
+            blocked.append((sev, location))
+    return blocked
+
+
 def post_review_comments(
     owner: str,
     repo: str,
@@ -471,6 +502,11 @@ def main() -> int:
     skill_path = os.getenv("SKILL_PATH", ".github/skills/code-review-pro/SKILL.md").strip()
     review_scope = os.getenv("REVIEW_SCOPE", "latest_commit").strip().lower() or "latest_commit"
     comment_mode = os.getenv("COMMENT_MODE", "inline_only").strip().lower() or "inline_only"
+    merge_gate_enabled = os.getenv("MERGE_GATE_ENABLED", "true").strip().lower() == "true"
+    raw_blocking = os.getenv("MERGE_GATE_SEVERITIES", "critical,high")
+    blocking_severities = {
+        s.strip().lower() for s in raw_blocking.split(",") if s.strip()
+    } or {"critical", "high"}
     expected_reviewer_login = os.getenv("GITHUB_TOKEN_EXPECTED_LOGIN", "").strip()
     dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
@@ -537,6 +573,20 @@ def main() -> int:
         )
     else:
         print("No line-level findings parsed. Nothing to post.")
+
+    if merge_gate_enabled:
+        blocked = collect_blocking_findings(review_md, blocking_severities)
+        if blocked:
+            print(
+                "MERGE GATE: blocking findings detected for severities "
+                f"{sorted(blocking_severities)}"
+            )
+            for sev, location in blocked[:20]:
+                print(f"  - {sev} at {location}")
+            if len(blocked) > 20:
+                print(f"  ... and {len(blocked) - 20} more")
+            return 2
+        print("MERGE GATE: no blocking findings in current commit review.")
     
     return 0
 

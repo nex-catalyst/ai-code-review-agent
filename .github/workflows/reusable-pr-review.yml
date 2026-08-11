@@ -6,15 +6,7 @@ on:
       target_base_branch:
         required: false
         type: string
-        default: develop
-      llm_model:
-        required: false
-        type: string
-        default: gpt-oss-120b
-      llm_base_url:
-        required: false
-        type: string
-        default: http://litellm-alb-1953047705.us-east-1.elb.amazonaws.com/v1
+        default: ""
       dry_run:
         required: false
         type: boolean
@@ -43,7 +35,7 @@ permissions:
 
 jobs:
   run-review:
-    if: github.event_name == 'pull_request' && github.base_ref == inputs.target_base_branch
+    if: github.event_name == 'pull_request' && (inputs.target_base_branch == '' || github.base_ref == inputs.target_base_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout central agent repository
@@ -66,8 +58,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CENTRAL_REVIEW_GH_TOKEN }}
           GITHUB_TOKEN_EXPECTED_LOGIN: ${{ inputs.expected_reviewer_login }}
           LLM_API_KEY: ${{ secrets.CENTRAL_REVIEW_LLM_API_KEY }}
-          LLM_MODEL: ${{ inputs.llm_model }}
-          LLM_BASE_URL: ${{ inputs.llm_base_url }}
+          LLM_MODEL: gpt-oss-120b
+          LLM_BASE_URL: http://litellm-alb-1953047705.us-east-1.elb.amazonaws.com/v1
           DRY_RUN: ${{ inputs.dry_run }}
           REVIEW_SCOPE: ${{ inputs.review_scope }}
           COMMENT_MODE: ${{ inputs.comment_mode }}

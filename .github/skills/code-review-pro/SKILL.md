@@ -64,6 +64,7 @@ Default ordering:
 
 - Python checklist: [python-review-checklist](./references/python-review-checklist.md)
 - TypeScript/Node checklist: [typescript-node-review-checklist](./references/typescript-node-review-checklist.md)
+- ReactJS checklist: [reactjs-review-checklist](./references/reactjs-review-checklist.md)
 - Regression heuristics: [regression-risk-playbook](./references/regression-risk-playbook.md)
 
 ## Output Contract (Required)
