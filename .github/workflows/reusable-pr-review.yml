@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       target_base_branch:
-        description: "Optional base branch filter. Accepts single branch, comma-separated list, or release/* prefix pattern. Empty means run for all PRs. Examples: 'main', 'develop,master', 'release/*'"
+        description: "Optional base branch filter. Empty means run for PRs targeting any base branch."
         required: false
         type: string
         default: ""
@@ -40,7 +40,7 @@ permissions:
 
 jobs:
   run-review:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (inputs.target_base_branch == '' || contains(format(',{0},', inputs.target_base_branch), format(',{0},', github.base_ref)) || (contains(inputs.target_base_branch, 'release/*') && startsWith(github.base_ref, 'release/')))
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (inputs.target_base_branch == '' || github.base_ref == inputs.target_base_branch)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout central agent repository
