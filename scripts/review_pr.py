@@ -441,9 +441,6 @@ def post_review_comments(
     - Checks if identical comment already exists at that line/file
     - Skips posting if same finding already commented
     """
-    if not findings:
-        return
-    
     print(f"[DEBUG] Processing {len(findings)} line-level findings...")
     
     # Get existing PR comments to check for duplicates.
@@ -638,20 +635,20 @@ def main() -> int:
 
     # Post line-level comments for this review scope.
     findings = parse_findings_with_locations(review_md)
-    if findings:
-        post_review_comments(
-            owner,
-            repo,
-            pr_number,
-            pr_sha,
-            github_token,
-            reviewer_login,
-            findings,
-            commentable_line_map,
-            moderate_cleanup_enabled,
-        )
-    else:
-        print("No line-level findings parsed. Nothing to post.")
+    if not findings:
+        print("No line-level findings parsed. Posting skipped; running cleanup pass.")
+
+    post_review_comments(
+        owner,
+        repo,
+        pr_number,
+        pr_sha,
+        github_token,
+        reviewer_login,
+        findings,
+        commentable_line_map,
+        moderate_cleanup_enabled,
+    )
 
     if merge_gate_enabled:
         blocked = collect_blocking_findings(review_md, blocking_severities)
